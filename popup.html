@@ -52,6 +52,11 @@
       font-variant-numeric: tabular-nums;
       color: #3366ff;
     }
+    .date-label {
+      font-size: 11px;
+      color: #9499a0;
+      margin-bottom: 10px;
+    }
     .hint {
       margin-top: 12px;
       font-size: 11px;
@@ -62,13 +67,15 @@
 </head>
 <body>
   <h1>今日网站停留时间</h1>
+  <p id="date-label" class="date-label">—</p>
   <div class="total-row">
     <span class="total-label">合计</span>
     <span id="total" class="total-time">—</span>
   </div>
   <div id="site-list" class="loading">加载中…</div>
-  <p class="hint">仅统计已配置站点在前台且浏览器窗口有焦点时的时长；切换站点会分别累计。</p>
+  <p class="hint">数据保存在本机，重启浏览器不会清零；每日 0:00（本地时间）自动开始新一天统计。</p>
   <script src="sites.js"></script>
+  <script src="storage.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -1,13 +1,3 @@
-const STORAGE_KEY = "dailyUsage";
-
-function todayKey() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
 function formatDuration(totalSeconds) {
   const sec = Math.max(0, Math.floor(totalSeconds));
   const minutes = Math.floor(sec / 60);
@@ -15,10 +5,34 @@ function formatDuration(totalSeconds) {
   return `${minutes}分${seconds}秒`;
 }
 
+/** 上次从后台拿到的基准数据，用于弹窗打开期间本地插值计时 */
+let snapshot = {
+  sites: {},
+  date: null,
+  tracking: null,
+  fetchedAt: 0,
+};
+
+/** 已落盘 + 当前计时段（由 sessionStart 推算，弹窗每秒本地刷新） */
+function sitesWithLivePending(baseSites, tracking, nowMs) {
+  const sites = { ...baseSites };
+  if (!tracking?.siteId || tracking.sessionStart == null) return sites;
+
+  const pending = Math.max(0, (nowMs - tracking.sessionStart) / 1000);
+  sites[tracking.siteId] = (sites[tracking.siteId] || 0) + pending;
+  return sites;
+}
+
 async function getTodayStatsFromBackground() {
   try {
     const res = await browser.runtime.sendMessage({ type: "GET_TODAY_STATS" });
-    if (res?.ok && res.sites) return res.sites;
+    if (res?.ok && res.sites) {
+      return {
+        sites: res.sites,
+        date: res.date || todayKey(),
+        tracking: res.tracking || null,
+      };
+    }
   } catch (e) {
     console.warn("[timer-for-browser popup]", e);
   }
@@ -26,12 +40,8 @@ async function getTodayStatsFromBackground() {
 }
 
 async function getTodayStatsFromStorage() {
-  const result = await browser.storage.local.get(STORAGE_KEY);
-  const data = result[STORAGE_KEY];
-  if (!data || data.date !== todayKey()) return {};
-  if (data.sites) return data.sites;
-  if (typeof data.seconds === "number") return { bilibili: data.seconds };
-  return {};
+  const sites = await loadDailySites();
+  return { sites, date: todayKey(), tracking: null };
 }
 
 function renderSiteList(sites) {
@@ -61,15 +71,34 @@ function renderSiteList(sites) {
   document.getElementById("total").textContent = formatDuration(total);
 }
 
-async function refresh() {
-  const stats =
-    (await getTodayStatsFromBackground()) ?? (await getTodayStatsFromStorage());
-  renderSiteList(stats);
+function renderFromSnapshot(nowMs = Date.now()) {
+  const liveSites = sitesWithLivePending(snapshot.sites, snapshot.tracking, nowMs);
+  document.getElementById("date-label").textContent =
+    `统计日 ${snapshot.date || todayKey()} · 每日 0:00 清零`;
+  renderSiteList(liveSites);
   document.getElementById("site-list").classList.remove("loading");
 }
 
+async function syncFromBackground() {
+  const payload =
+    (await getTodayStatsFromBackground()) ?? (await getTodayStatsFromStorage());
+  snapshot = {
+    sites: payload.sites,
+    date: payload.date,
+    tracking: payload.tracking,
+    fetchedAt: Date.now(),
+  };
+  renderFromSnapshot();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
-  refresh();
-  const timer = setInterval(refresh, 1000);
-  window.addEventListener("unload", () => clearInterval(timer));
+  syncFromBackground();
+  const syncTimer = setInterval(syncFromBackground, 2000);
+  const uiTimer = setInterval(() => renderFromSnapshot(), 1000);
+
+  window.addEventListener("unload", () => {
+    clearInterval(syncTimer);
+    clearInterval(uiTimer);
+    browser.runtime.sendMessage({ type: "RESUME_SESSION" }).catch(() => {});
+  });
 });

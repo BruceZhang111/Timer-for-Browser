@@ -1,83 +1,53 @@
 /**
- * 按自然日、按站点累计前台停留秒数。
- * 仅当标签为配置站点、处于当前窗口前台且浏览器窗口有焦点时计时。
+ * 统计指定站点在前台、窗口有焦点时的停留时长。
+ * - 数据写入 browser.storage.local，浏览器重启不丢失
+ * - 每日 0:00（本地时区）自动换日清零
+ * - 跨午夜计时会按自然日切分
  */
-
-const STORAGE_KEY = "dailyUsage";
 
 /** @type {number | null} */
 let activeTabId = null;
-/** @type {string | null} 当前计时的站点 id */
+/** @type {string | null} */
 let activeSiteId = null;
 /** @type {number | null} */
 let sessionStart = null;
-
-function todayKey() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-/** @returns {Record<string, number>} */
-async function loadDailySites() {
-  const result = await browser.storage.local.get(STORAGE_KEY);
-  const data = result[STORAGE_KEY];
-  if (!data || data.date !== todayKey()) return {};
-
-  if (data.sites && typeof data.sites === "object") {
-    return { ...data.sites };
-  }
-  // 兼容旧版仅统计 B 站的存储格式
-  if (typeof data.seconds === "number" && data.seconds > 0) {
-    return { bilibili: data.seconds };
-  }
-  return {};
-}
-
-async function saveDailySites(sites) {
-  const cleaned = {};
-  for (const [id, sec] of Object.entries(sites)) {
-    cleaned[id] = Math.max(0, Math.floor(sec));
-  }
-  await browser.storage.local.set({
-    [STORAGE_KEY]: {
-      date: todayKey(),
-      sites: cleaned,
-    },
-  });
-}
 
 function pendingSeconds() {
   if (sessionStart == null) return 0;
   return Math.max(0, (Date.now() - sessionStart) / 1000);
 }
 
-/** 各站点今日秒数（含当前未落盘时段） */
-async function getTodayStats() {
-  const sites = await loadDailySites();
-  if (activeSiteId && sessionStart != null) {
-    sites[activeSiteId] = (sites[activeSiteId] || 0) + pendingSeconds();
+/** 仅跨自然日时落盘并换桶（查询统计时不能 flush，否则弹窗轮询会打断计时） */
+async function ensureTodayBucket() {
+  const data = await getStoredDaily();
+  const today = todayKey();
+  if (data && data.date !== today) {
+    await flushSession();
+    await rolloverDayIfNeeded();
+    return true;
   }
-  return sites;
+  await rolloverDayIfNeeded();
+  return false;
 }
 
-async function addElapsedSeconds(siteId, deltaSec) {
-  if (!siteId || deltaSec <= 0) return;
+async function getTodayStats() {
+  await ensureTodayBucket();
   const sites = await loadDailySites();
-  sites[siteId] = (sites[siteId] || 0) + deltaSec;
-  await saveDailySites(sites);
+  const tracking =
+    activeSiteId && sessionStart != null
+      ? { siteId: activeSiteId, sessionStart }
+      : null;
+  return { sites, tracking };
 }
 
 async function flushSession() {
   if (sessionStart == null || !activeSiteId) return;
-  const elapsed = (Date.now() - sessionStart) / 1000;
+  const start = sessionStart;
   const siteId = activeSiteId;
   sessionStart = null;
   activeTabId = null;
   activeSiteId = null;
-  await addElapsedSeconds(siteId, elapsed);
+  await addElapsedForRange(siteId, start, Date.now());
 }
 
 async function isTabWindowFocused(tabId) {
@@ -91,6 +61,8 @@ async function isTabWindowFocused(tabId) {
 }
 
 async function maybeStartSession(tabId, url) {
+  await ensureTodayBucket();
+
   const siteId = matchSite(url);
   if (!siteId) {
     await flushSession();
@@ -128,11 +100,18 @@ async function handleTabUpdated(tabId, changeInfo, tab) {
   await maybeStartSession(tabId, tab.url || changeInfo.url);
 }
 
+let blurFlushTimer = null;
+
 async function handleWindowFocusChanged(windowId) {
   if (windowId === browser.windows.WINDOW_ID_NONE) {
-    await flushSession();
+    clearTimeout(blurFlushTimer);
+    blurFlushTimer = setTimeout(() => {
+      blurFlushTimer = null;
+      flushSession();
+    }, 400);
     return;
   }
+  clearTimeout(blurFlushTimer);
   const tabs = await browser.tabs.query({ active: true, windowId });
   if (tabs.length) {
     await maybeStartSession(tabs[0].id, tabs[0].url);
@@ -147,33 +126,30 @@ async function handleTabRemoved(tabId) {
   }
 }
 
-browser.alarms.create("flush", { periodInMinutes: 1 });
-browser.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name !== "flush" || sessionStart == null || !activeSiteId) return;
-  const elapsed = (Date.now() - sessionStart) / 1000;
-  await addElapsedSeconds(activeSiteId, elapsed);
-  sessionStart = Date.now();
-});
-
-browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "GET_TODAY_STATS") {
-    getTodayStats()
-      .then((sites) => sendResponse({ ok: true, sites }))
-      .catch((err) => {
-        console.error("[timer-for-browser]", err);
-        sendResponse({ ok: false, sites: {} });
-      });
-    return true;
+/** 每分钟落盘，降低异常退出丢数据风险 */
+async function ensurePeriodicFlushAlarm() {
+  const alarms = await browser.alarms.getAll();
+  if (!alarms.some((a) => a.name === "flush")) {
+    await browser.alarms.create("flush", { periodInMinutes: 1 });
   }
-  return false;
-});
+}
 
-browser.tabs.onActivated.addListener(handleTabActivated);
-browser.tabs.onUpdated.addListener(handleTabUpdated);
-browser.windows.onFocusChanged.addListener(handleWindowFocusChanged);
-browser.tabs.onRemoved.addListener(handleTabRemoved);
+/** 预约下一次本地 0:00 换日 */
+async function scheduleMidnightAlarm() {
+  await browser.alarms.clear("midnight");
+  await browser.alarms.create("midnight", {
+    when: Date.now() + msUntilNextMidnight(),
+  });
+}
 
-(async () => {
+async function handleMidnightRollover() {
+  await flushSession();
+  await rolloverDayIfNeeded();
+  await scheduleMidnightAlarm();
+  await resumeActiveTabSession();
+}
+
+async function resumeActiveTabSession() {
   try {
     const tabs = await browser.tabs.query({
       active: true,
@@ -185,4 +161,73 @@ browser.tabs.onRemoved.addListener(handleTabRemoved);
   } catch (e) {
     console.error("[timer-for-browser]", e);
   }
-})();
+}
+
+async function checkpointSession() {
+  if (sessionStart == null || !activeSiteId) return;
+  const start = sessionStart;
+  const siteId = activeSiteId;
+  const end = Date.now();
+  sessionStart = end;
+  await addElapsedForRange(siteId, start, end);
+}
+
+browser.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === "flush") {
+    await checkpointSession();
+    return;
+  }
+  if (alarm.name === "midnight") {
+    await handleMidnightRollover();
+  }
+});
+
+browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "GET_TODAY_STATS") {
+    getTodayStats()
+      .then(({ sites, tracking }) =>
+        sendResponse({ ok: true, sites, date: todayKey(), tracking })
+      )
+      .catch((err) => {
+        console.error("[timer-for-browser]", err);
+        sendResponse({ ok: false, sites: {}, date: todayKey(), tracking: null });
+      });
+    return true;
+  }
+  if (message?.type === "RESUME_SESSION") {
+    resumeActiveTabSession()
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+  return false;
+});
+
+browser.tabs.onActivated.addListener(handleTabActivated);
+browser.tabs.onUpdated.addListener(handleTabUpdated);
+browser.windows.onFocusChanged.addListener(handleWindowFocusChanged);
+browser.tabs.onRemoved.addListener(handleTabRemoved);
+
+/** 浏览器启动：恢复闹钟与计时，不重置 storage */
+browser.runtime.onStartup.addListener(() => {
+  initExtension();
+});
+
+browser.runtime.onInstalled.addListener(() => {
+  initExtension();
+});
+
+if (browser.runtime.onSuspend) {
+  browser.runtime.onSuspend.addListener(() => {
+    flushSession();
+  });
+}
+
+async function initExtension() {
+  await ensureTodayBucket();
+  await ensurePeriodicFlushAlarm();
+  await scheduleMidnightAlarm();
+  await resumeActiveTabSession();
+}
+
+initExtension();
