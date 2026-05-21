@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>网站停留时间</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      min-width: 280px;
+      padding: 16px 18px;
+      background: #f6f7f8;
+      color: #18191c;
+    }
+    h1 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #3366ff;
+      margin-bottom: 12px;
+    }
+    .total-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding-bottom: 10px;
+      margin-bottom: 10px;
+      border-bottom: 1px solid #e3e5e7;
+    }
+    .total-label {
+      font-size: 12px;
+      color: #61666d;
+    }
+    .total-time {
+      font-size: 20px;
+      font-weight: 700;
+    }
+    #site-list.loading {
+      color: #9499a0;
+      font-size: 13px;
+    }
+    .site-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      font-size: 13px;
+    }
+    .site-name { color: #18191c; }
+    .site-time {
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: #3366ff;
+    }
+    .hint {
+      margin-top: 12px;
+      font-size: 11px;
+      color: #61666d;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <h1>今日网站停留时间</h1>
+  <div class="total-row">
+    <span class="total-label">合计</span>
+    <span id="total" class="total-time">—</span>
+  </div>
+  <div id="site-list" class="loading">加载中…</div>
+  <p class="hint">仅统计已配置站点在前台且浏览器窗口有焦点时的时长；切换站点会分别累计。</p>
+  <script src="sites.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

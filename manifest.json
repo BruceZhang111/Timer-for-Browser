@@ -1,0 +1,32 @@
+{
+  "manifest_version": 2,
+  "name": "Timer for Browser",
+  "version": "1.1.0",
+  "description": "统计每天在指定网站上的前台停留时间",
+  "permissions": [
+    "tabs",
+    "storage",
+    "alarms",
+    "https://gemini.google.com/*",
+    "https://*.zhihu.com/*",
+    "https://zhihu.com/*",
+    "https://*.xiaohongshu.com/*",
+    "https://xiaohongshu.com/*",
+    "https://*.douyin.com/*",
+    "https://douyin.com/*",
+    "https://*.bilibili.com/*",
+    "https://bilibili.com/*"
+  ],
+  "background": {
+    "scripts": ["sites.js", "background.js"],
+    "persistent": true
+  },
+  "browser_action": {
+    "default_title": "网站停留时间",
+    "default_popup": "popup.html",
+    "default_icon": "icons/timer.svg"
+  },
+  "icons": {
+    "48": "icons/timer.svg"
+  }
+}
