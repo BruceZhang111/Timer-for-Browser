@@ -21,6 +21,9 @@ function formatDuration(totalSeconds) {
 /* ================================================================
    Drag‑and‑drop controller (FLIP animation strategy, rAF‑batched)
    ================================================================ */
+/* ================================================================
+   Drag‑and‑drop controller (Virtual Translation Strategy / iOS Style)
+   ================================================================ */
 const dragCtrl = {
   active: false,
   sourceEl: null,
@@ -33,18 +36,18 @@ const dragCtrl = {
   moved: false,
   threshold: 5,
 
-  /* ---- Geometry cache (computed once per drag start / after each reorder) ---- */
+  // 几何位置缓存
+  _dragItems: [],
   _startY: 0,
+  initialBaseTop: 0,
+  initialScrollTop: 0,
   baseTop: 0,
   itemFullHeight: 0,
   itemCount: 0,
 
-  /* ---- rAF throttle ---- */
+  // rAF 节流
   _rafId: null,
   _pendingY: 0,
-
-  /* ---- Flip cleanup tracking ---- */
-  _flipTimerId: null,
 
   init(listEl, scrollEl) {
     this.listEl = listEl;
@@ -53,7 +56,6 @@ const dragCtrl = {
 
   onPointerDown(e) {
     if (this.active) return;
-
     const row = e.target.closest(".site-row-wrap");
     if (!row) return;
     if (e.target.closest(".btn-more, .action-btn, .site-row-actions")) return;
@@ -64,10 +66,11 @@ const dragCtrl = {
     if (typeof closeAllRowMenus === "function") closeAllRowMenus();
 
     this.sourceEl = row;
-    this.sourceIndex = [...this.listEl.children].indexOf(row);
-    this.currentIndex = this.sourceIndex;
     this._startY = e.clientY;
     this.moved = false;
+
+    // 1. 立刻给予按下反馈（微缩或获得焦点）
+    row.classList.add("is-clicked");
 
     row.setPointerCapture(e.pointerId);
     row.addEventListener("pointermove", this._onRowMove);
@@ -75,17 +78,17 @@ const dragCtrl = {
     row.addEventListener("pointercancel", this._onRowUp);
   },
 
-  _onRowMove(e) {
+  _onRowMove: (e) => {
     const self = dragCtrl;
     const dy = e.clientY - self._startY;
     if (!self.moved && Math.abs(dy) < self.threshold) return;
 
     if (!self.moved) {
       self.moved = true;
+      self.sourceEl.classList.remove("is-clicked"); // 消除按下态，准备起飞
       self._startDrag(e.clientY);
     }
 
-    /* rAF-batched: only one visual update per frame */
     self._pendingY = e.clientY;
     if (!self._rafId) {
       self._rafId = requestAnimationFrame(() => {
@@ -95,10 +98,11 @@ const dragCtrl = {
     }
   },
 
-  _onRowUp(e) {
+ _onRowUp: (e) => {
     const self = dragCtrl;
     const row = self.sourceEl;
     if (row) {
+      row.classList.remove("is-clicked");
       row.removeEventListener("pointermove", self._onRowMove);
       row.removeEventListener("pointerup", self._onRowUp);
       row.removeEventListener("pointercancel", self._onRowUp);
@@ -111,48 +115,46 @@ const dragCtrl = {
 
     if (!self.moved) {
       self._fireClick(row);
+      // 如果只是点击没拖拽，立刻结束状态并恢复定时器
+      self.active = false;
+      self.sourceEl = null;
+      self.moved = false;
+      if (typeof resumeTimers === "function") resumeTimers();
     } else {
+      // 发生了拖拽，交接给 _endDrag 处理收尾
       self._endDrag();
     }
-    self.active = false;
-    self.sourceEl = null;
-    self.moved = false;
-
-    /* Resume timers that were paused during drag */
-    if (typeof resumeTimers === "function") resumeTimers();
   },
 
-  /* ================================================================
-     Drag start — measure geometry once
-     ================================================================ */
   _startDrag(pointerY) {
     this.active = true;
-
-    /* Pause background timers to avoid DOM rebuild during drag */
     if (typeof pauseTimers === "function") pauseTimers();
 
-    /* Clean up any lingering clone */
     if (this.cloneEl) {
       this.cloneEl.remove();
       this.cloneEl = null;
     }
-    this._cancelFlipCleanup();
 
-    /* ---- Measure item geometry (once) ---- */
-    const allItems = [...this.listEl.querySelectorAll(".site-row-wrap")];
-    this.itemCount = allItems.length;
+    // 缓存所有 DOM，后续全程通过 CSS transform 操作
+    this._dragItems = [...this.listEl.querySelectorAll(".site-row-wrap")];
+    this.itemCount = this._dragItems.length;
+    this.sourceIndex = this._dragItems.indexOf(this.sourceEl);
+    this.currentIndex = this.sourceIndex;
 
-    if (allItems.length >= 2) {
-      const r0 = allItems[0].getBoundingClientRect();
-      const r1 = allItems[1].getBoundingClientRect();
+    // 测算高度与布局基准
+    if (this.itemCount >= 2) {
+      const r0 = this._dragItems[0].getBoundingClientRect();
+      const r1 = this._dragItems[1].getBoundingClientRect();
       this.itemFullHeight = r1.top - r0.top;
     } else {
-      this.itemFullHeight = allItems[0].getBoundingClientRect().height + 12;
+      this.itemFullHeight = this._dragItems[0].getBoundingClientRect().height + 12;
     }
-    /* Virtual top of item index 0 in viewport coords */
-    this.baseTop = allItems[0].getBoundingClientRect().top;
 
-    /* ---- Build floating clone ---- */
+    this.initialScrollTop = this.scrollEl.scrollTop;
+    this.initialBaseTop = this._dragItems[0].getBoundingClientRect().top;
+    this._refreshBaseTop();
+
+    // 构建悬浮克隆层
     const panel = this.sourceEl.querySelector(".site-row-panel");
     const rect = panel.getBoundingClientRect();
 
@@ -166,52 +168,141 @@ const dragCtrl = {
     cloneWrap.appendChild(panelClone);
     document.body.appendChild(cloneWrap);
 
+    // 2. 生命感起飞动画：平滑放大、增加阴影
+    requestAnimationFrame(() => {
+      panelClone.style.transition = 'transform 0.25s cubic-bezier(0.2, 0, 0, 1), box-shadow 0.25s ease';
+      panelClone.style.transform = 'scale(1.05)';
+      panelClone.style.boxShadow = '0 16px 32px rgba(51, 102, 255, 0.15)';
+    });
+
     this.cloneEl = cloneWrap;
     this.pointerOffsetY = rect.top - pointerY;
 
-    /* Ghost the source slot */
+    // 源元素变成灰色底层占位符
     this.sourceEl.classList.add("is-drag-source");
+
+    // 清空任何历史过渡状态
+    this._dragItems.forEach(item => {
+      item.style.transform = '';
+      item.style.transition = '';
+    });
   },
 
-  /* ================================================================
-     Frame‑batched update — O(1) target calculation
-     ================================================================ */
   _doUpdateDrag(pointerY) {
-    /* -- Move clone (rounded to whole pixels, no sub‑pixel blur) -- */
-    const top = Math.round(pointerY + this.pointerOffsetY);
-    this.cloneEl.style.top = top + "px";
+    // 悬浮层跟手移动
+    this.cloneEl.style.top = Math.round(pointerY + this.pointerOffsetY) + "px";
 
-    /* -- Auto‑scroll near edges -- */
     this._autoScroll(pointerY);
-
-    /* -- O(1) target index: arithmetic from geometry cache -- */
     this._refreshBaseTop();
+
+    // 计算当前应当处于的视觉索引
     const raw = Math.floor((pointerY - this.baseTop + this.itemFullHeight * 0.5) / this.itemFullHeight);
     const targetIdx = Math.max(0, Math.min(raw, this.itemCount - 1));
 
     if (targetIdx !== this.currentIndex) {
-      this._reorder(targetIdx);
+      this._shiftItems(targetIdx);
+      this.currentIndex = targetIdx;
     }
   },
 
-  /* Single getBoundingClientRect call to account for auto‑scroll shift */
-  _refreshBaseTop() {
-    const first = this.listEl.querySelector(".site-row-wrap");
-    if (!first) return;
-    const idx = [...this.listEl.children].indexOf(first);
-    this.baseTop = first.getBoundingClientRect().top - idx * this.itemFullHeight;
+  _shiftItems(targetIdx) {
+    const startIdx = this.sourceIndex;
+    // 使用 Apple 经典的优雅过渡曲线
+    const ease = 'transform 0.35s cubic-bezier(0.33, 1, 0.68, 1)';
+
+    // 3. 动态移动占位符：让底部的缺口像有生命一样跟随滑动
+    const placeholderTy = (targetIdx - startIdx) * this.itemFullHeight;
+    this.sourceEl.style.transition = ease;
+    this.sourceEl.style.transform = `translate3d(0, ${placeholderTy}px, 0)`;
+
+    // 根据目标位置推挤其他项目 (全部通过 GPU 计算位移)
+    for (let i = 0; i < this.itemCount; i++) {
+      if (i === startIdx) continue;
+      const item = this._dragItems[i];
+      let ty = 0;
+
+      if (startIdx < targetIdx && i > startIdx && i <= targetIdx) {
+        ty = -this.itemFullHeight; // 向上让位
+      } else if (startIdx > targetIdx && i >= targetIdx && i < startIdx) {
+        ty = this.itemFullHeight;  // 向下让位
+      }
+
+      item.style.transition = ease;
+      item.style.transform = `translate3d(0, ${ty}px, 0)`;
+    }
   },
 
-  /* ================================================================
-     Auto‑scroll — only hit getBoundingClientRect when near edges
-     ================================================================ */
+ _endDrag() {
+    if (!this.cloneEl || !this.sourceEl) return;
+
+    this._refreshBaseTop();
+    const finalTop = this.baseTop + this.currentIndex * this.itemFullHeight;
+
+    // 4. 落地吸附动画
+    this.cloneEl.style.transition = 'top 0.3s cubic-bezier(0.33, 1, 0.68, 1)';
+    this.cloneEl.style.top = Math.round(finalTop) + "px";
+
+    const panelClone = this.cloneEl.querySelector('.site-row-panel');
+    if (panelClone) {
+      panelClone.style.transform = 'scale(1)';
+      panelClone.style.boxShadow = '0 2px 8px rgba(30, 40, 90, 0.06)';
+    }
+
+    const onDropComplete = () => {
+      if (this.cloneEl) {
+        this.cloneEl.remove();
+        this.cloneEl = null;
+      }
+
+      // 5. 动画落幕后：静默变更真实 DOM 结构
+      if (this.currentIndex !== this.sourceIndex) {
+        const targetNode = this._dragItems[this.currentIndex];
+        if (this.currentIndex > this.sourceIndex) {
+          this.listEl.insertBefore(this.sourceEl, targetNode.nextSibling);
+        } else {
+          this.listEl.insertBefore(this.sourceEl, targetNode);
+        }
+      }
+
+      // 重置所有视觉偏移属性
+      this._dragItems.forEach(item => {
+        item.style.transition = '';
+        item.style.transform = '';
+      });
+
+      this.sourceEl.classList.remove("is-drag-source");
+
+      // 6. 持久化顺序并彻底结束拖拽状态
+      this._persistOrder().then(() => {
+        this.active = false;
+        this.sourceEl = null;
+        this.moved = false;
+        if (typeof resumeTimers === "function") resumeTimers();
+      });
+    };
+
+    this.cloneEl.addEventListener("transitionend", onDropComplete, { once: true });
+    // 后备机制
+    setTimeout(() => {
+      if (this.sourceEl && this.sourceEl.classList.contains("is-drag-source")) {
+        onDropComplete();
+      }
+    }, 350);
+  },
+
+  _refreshBaseTop() {
+    // 抵消滚动差值，保证无论怎么滚都能精准定位
+    const scrollDelta = this.scrollEl.scrollTop - this.initialScrollTop;
+    this.baseTop = this.initialBaseTop - scrollDelta;
+  },
+
   _autoScroll(pointerY) {
     const margin = 50;
     const scrollRect = this.scrollEl.getBoundingClientRect();
     if (pointerY > scrollRect.top + margin && pointerY < scrollRect.bottom - margin) return;
 
     const zone = 40;
-    const maxSpeed = 6;
+    const maxSpeed = 7;
 
     if (pointerY < scrollRect.top + zone) {
       const frac = Math.max(0, 1 - (pointerY - scrollRect.top) / zone);
@@ -222,137 +313,27 @@ const dragCtrl = {
     }
   },
 
-  /* ================================================================
-     FLIP reorder — batch reads, cancel stale cleanups
-     ================================================================ */
-  _reorder(targetIdx) {
-    if (targetIdx === this.currentIndex) return;
-    const oldIdx = this.currentIndex;
-
-    this._cancelFlipCleanup();
-
-    /* ---- Phase 1: read all old positions ---- */
-    const allItems = [...this.listEl.querySelectorAll(".site-row-wrap")];
-    const first = new Map();
-    for (const item of allItems) {
-      if (item !== this.sourceEl) {
-        first.set(item, item.getBoundingClientRect().top);
-      }
-    }
-
-    /* ---- Phase 2: mutate DOM ---- */
-    const children = [...this.listEl.children];
-    if (targetIdx > oldIdx) {
-      this.listEl.insertBefore(this.sourceEl, children[targetIdx + 1] || null);
-    } else {
-      this.listEl.insertBefore(this.sourceEl, children[targetIdx]);
-    }
-
-    /* ---- Phase 3: read new positions, compute deltas ---- */
-    const flipping = [];
-    for (const [item, oldTop] of first) {
-      const newTop = item.getBoundingClientRect().top;
-      const delta = oldTop - newTop;
-      if (Math.abs(delta) > 0.2) {
-        flipping.push({ item, delta });
-      }
-    }
-
-    /* ---- Phase 4: invert (apply inverse transform, no transition) ---- */
-    for (const { item, delta } of flipping) {
-      item.classList.add("is-flipping");
-      item.style.transition = "none";
-      item.style.transform = `translateY(${delta}px)`;
-    }
-
-    /* ---- Phase 5: play (enable spring transition, remove inverse) ---- */
-    if (flipping.length) {
-      flipping[0].item.getBoundingClientRect(); // force style flush
-    }
-
-    for (const { item } of flipping) {
-      item.style.transition = "";  // CSS class `.is-flipping` provides the spring curve
-      item.style.transform = "";
-    }
-
-    /* ---- Cleanup after animation ---- */
-    this._flipTimerId = setTimeout(() => {
-      this._flipTimerId = null;
-      for (const { item } of flipping) {
-        item.classList.remove("is-flipping");
-        item.style.transform = "";
-      }
-    }, 320);
-
-    this.currentIndex = targetIdx;
-  },
-
-  _cancelFlipCleanup() {
-    if (this._flipTimerId != null) {
-      clearTimeout(this._flipTimerId);
-      this._flipTimerId = null;
-    }
-    /* Also scrub any leftover flip classes on current items */
-    for (const el of this.listEl.querySelectorAll(".is-flipping")) {
-      el.classList.remove("is-flipping");
-      el.style.transform = "";
-      el.style.transition = "";
-    }
-  },
-
-  /* ================================================================
-     Drag end — spring clone to target, then persist
-     ================================================================ */
-  _endDrag() {
-    if (!this.cloneEl || !this.sourceEl) return;
-
-    this._cancelFlipCleanup();
-
-    const panel = this.sourceEl.querySelector(".site-row-panel");
-    const targetRect = panel.getBoundingClientRect();
-
-    this.cloneEl.style.transition =
-      "left 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), top 0.25s cubic-bezier(0.34, 1.56, 0.64, 1)";
-    this.cloneEl.style.left = Math.round(targetRect.left) + "px";
-    this.cloneEl.style.top = Math.round(targetRect.top) + "px";
-
-    this.sourceEl.classList.remove("is-drag-source");
-
-    const onEnd = () => {
-      if (this.cloneEl) {
-        this.cloneEl.remove();
-        this.cloneEl = null;
-      }
-      this._persistOrder();
-    };
-
-    this.cloneEl.addEventListener("transitionend", onEnd, { once: true });
-    setTimeout(() => {
-      if (this.cloneEl) {
-        this.cloneEl.remove();
-        this.cloneEl = null;
-        this._persistOrder();
-      }
-    }, 350);
-  },
-
-  /* ================================================================
-     Click micro‑interaction
-     ================================================================ */
   _fireClick(row) {
     if (!row) return;
     row.classList.add("is-clicked");
-    setTimeout(() => row.classList.remove("is-clicked"), 250);
+    setTimeout(() => row.classList.remove("is-clicked"), 200);
   },
 
-  async _persistOrder() {
+async _persistOrder() {
     const items = this.listEl.querySelectorAll(".site-row-wrap");
     const orderedIds = [...items].map((el) => el.dataset.siteId).filter(Boolean);
     try {
-      await browser.runtime.sendMessage({
+      const res = await browser.runtime.sendMessage({
         type: "REORDER_TRACKED_SITES",
         siteIds: orderedIds,
       });
+      
+      // 更新本地缓存，防止后续 render 渲染旧顺序导致闪烁
+      if (res?.ok && Array.isArray(res.trackedSites)) {
+        if (typeof trackedSitesList !== 'undefined') {
+          trackedSitesList = res.trackedSites;
+        }
+      }
     } catch (e) {
       console.warn("[timer-for-browser popup] reorder persist failed", e);
     }
