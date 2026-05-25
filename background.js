@@ -32,12 +32,13 @@ async function ensureTodayBucket() {
 
 async function getTodayStats() {
   await ensureTodayBucket();
+  await refreshSitesCache();
   const sites = await loadDailySites();
   const tracking =
     activeSiteId && sessionStart != null
       ? { siteId: activeSiteId, sessionStart }
       : null;
-  return { sites, tracking };
+  return { sites, tracking, trackedSites: getAllSites() };
 }
 
 async function flushSession() {
@@ -185,13 +186,75 @@ browser.alarms.onAlarm.addListener(async (alarm) => {
 browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "GET_TODAY_STATS") {
     getTodayStats()
-      .then(({ sites, tracking }) =>
-        sendResponse({ ok: true, sites, date: todayKey(), tracking })
+      .then(({ sites, tracking, trackedSites }) =>
+        sendResponse({
+          ok: true,
+          sites,
+          date: todayKey(),
+          tracking,
+          trackedSites,
+        })
       )
       .catch((err) => {
         console.error("[timer-for-browser]", err);
-        sendResponse({ ok: false, sites: {}, date: todayKey(), tracking: null });
+        sendResponse({
+          ok: false,
+          sites: {},
+          date: todayKey(),
+          tracking: null,
+          trackedSites: getAllSites(),
+        });
       });
+    return true;
+  }
+  if (message?.type === "GET_TRACKED_SITES") {
+    refreshSitesCache()
+      .then(() => sendResponse({ ok: true, trackedSites: getAllSites() }))
+      .catch((err) => {
+        sendResponse({ ok: false, trackedSites: getAllSites(), error: String(err) });
+      });
+    return true;
+  }
+  if (message?.type === "ADD_CUSTOM_SITE") {
+    addCustomSite(message.url, message.name, {
+      permissionsGranted: Boolean(message.permissionsGranted),
+    })
+      .then(async (site) => {
+        await refreshSitesCache();
+        resumeActiveTabSession();
+        sendResponse({
+          ok: true,
+          site,
+          trackedSites: getAllSites(),
+        });
+      })
+      .catch((err) => {
+        sendResponse({ ok: false, error: err.message || String(err) });
+      });
+    return true;
+  }
+  if (message?.type === "RENAME_TRACKED_SITE") {
+    renameTrackedSite(message.siteId, message.name)
+      .then((site) => {
+        sendResponse({ ok: true, site, trackedSites: getAllSites() });
+      })
+      .catch((err) => {
+        sendResponse({ ok: false, error: err.message || String(err) });
+      });
+    return true;
+  }
+  if (message?.type === "REMOVE_TRACKED_SITE") {
+    const siteId = message.siteId;
+    (async () => {
+      if (activeSiteId === siteId) {
+        await flushSession();
+      }
+      await removeTrackedSite(siteId);
+      await resumeActiveTabSession();
+      sendResponse({ ok: true, trackedSites: getAllSites() });
+    })().catch((err) => {
+      sendResponse({ ok: false, error: err.message || String(err) });
+    });
     return true;
   }
   if (message?.type === "RESUME_SESSION") {
@@ -223,7 +286,18 @@ if (browser.runtime.onSuspend) {
   });
 }
 
+if (browser.permissions.onAdded) {
+  browser.permissions.onAdded.addListener(() => {
+    tryCompletePendingAdd().then((ok) => {
+      if (ok) resumeActiveTabSession();
+    });
+  });
+}
+
 async function initExtension() {
+  await refreshSitesCache();
+  await checkCustomSitePermissions();
+  await tryCompletePendingAdd();
   await ensureTodayBucket();
   await ensurePeriodicFlushAlarm();
   await scheduleMidnightAlarm();

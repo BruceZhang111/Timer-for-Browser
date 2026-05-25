@@ -71,6 +71,26 @@ async function saveDailySites(sites) {
   });
 }
 
+/** 删除某站点在今日统计中的记录 */
+async function removeSiteFromDailyStats(siteId) {
+  if (!siteId) return;
+  return runStorageOp(async () => {
+    const result = await browser.storage.local.get(STORAGE_KEY);
+    const data = result[STORAGE_KEY];
+    if (!data?.sites || data.date !== todayKey()) return;
+
+    const sites = { ...data.sites };
+    delete sites[siteId];
+    await browser.storage.local.set({
+      [STORAGE_KEY]: {
+        date: data.date,
+        sites,
+        updatedAt: Date.now(),
+      },
+    });
+  });
+}
+
 /**
  * 若 storage 里仍是昨日数据：归档后清空，开始新一天（0:00 刷新）
  * @returns {boolean} 是否发生了换日

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Timer for Browser",
-  "version": "1.2.0",
+  "version": "1.5.0",
   "description": "持久统计指定网站每日前台停留时间，每日 0:00 自动清零",
   "browser_specific_settings": {
     "gecko": {
@@ -15,16 +15,11 @@
   "permissions": [
     "tabs",
     "storage",
-    "alarms",
-    "https://gemini.google.com/*",
-    "https://*.zhihu.com/*",
-    "https://zhihu.com/*",
-    "https://*.xiaohongshu.com/*",
-    "https://xiaohongshu.com/*",
-    "https://*.douyin.com/*",
-    "https://douyin.com/*",
-    "https://*.bilibili.com/*",
-    "https://bilibili.com/*"
+    "alarms"
+  ],
+  "optional_permissions": [
+    "https://*/*",
+    "http://*/*"
   ],
   "background": {
     "scripts": ["sites.js", "storage.js", "background.js"],
