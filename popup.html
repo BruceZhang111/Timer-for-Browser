@@ -148,6 +148,16 @@
       overflow: hidden;
       margin: 6px 0;
       border-radius: 14px;
+      touch-action: none;
+      contain: layout style;
+      cursor: grab;
+    }
+    .site-row-wrap.is-dragging {
+      cursor: grabbing;
+    }
+    .site-row-wrap .btn-more {
+      cursor: pointer;
+      touch-action: auto;
     }
 
     .site-row-actions {
@@ -204,8 +214,84 @@
       font-size: 13px;
       background: #fff;
       border-radius: 14px;
-      transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+      /* Only animate shadow/bg by default; transform transition is scoped below */
+      transition: box-shadow 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+                  background-color 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* transform transition only when swipe or click animation is active */
+    .site-row-wrap.is-open .site-row-panel,
+    .site-row-wrap.is-clicked .site-row-panel {
+      transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+                  box-shadow 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+                  background-color 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* ---- Drag handle ---- */
+    .drag-handle {
+      flex-shrink: 0;
+      width: 18px;
+      height: 26px;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      cursor: grab;
+      user-select: none;
+      margin-left: 2px;
+      position: relative;
+    }
+    .drag-handle::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(circle at 50% 4px, #b0bbd8 1.2px, transparent 1.2px),
+        radial-gradient(circle at 50% 13px, #b0bbd8 1.2px, transparent 1.2px),
+        radial-gradient(circle at 50% 22px, #b0bbd8 1.2px, transparent 1.2px);
+      background-repeat: no-repeat;
+    }
+    .site-row-wrap:hover .drag-handle { opacity: 0.55; }
+    .site-row-wrap.is-dragging .drag-handle,
+    .site-row-wrap.is-drag-source .drag-handle { opacity: 0; }
+
+    /* ---- Click micro-interaction ---- */
+    .site-row-wrap.is-clicked .site-row-panel {
+      transform: translateY(-2px) scale(1.03);
+      box-shadow: 0 8px 24px rgba(30, 40, 90, 0.1);
+      background-color: #f6f8ff;
+    }
+
+    /* ---- Drag source (placeholder left behind) ---- */
+    .site-row-wrap.is-drag-source {
+      opacity: 0.32;
+      pointer-events: none;
+    }
+    .site-row-wrap.is-drag-source .site-row-panel {
+      background: #e8ecf4;
+      box-shadow: none;
+      transform: scale(0.96);
+      transition: none; /* instant, no fight with drag */
+    }
+
+    /* ---- Floating drag clone ---- */
+    .drag-clone {
+      position: fixed;
+      z-index: 9999;
+      pointer-events: none;
+      opacity: 0.94;
+      will-change: transform, left, top;
+      /* no transition here — JS drives left/top directly */
+    }
+    .drag-clone .site-row-panel {
+      box-shadow: 0 16px 40px rgba(30, 40, 90, 0.16);
+      transform: scale(1.04);
+      background-color: #fff;
+      transition: none; /* instant, no inherited transition */
+    }
+
+    /* ---- FLIP transition for reordering ---- */
+    .site-row-wrap.is-flipping {
       will-change: transform;
+      transition: transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
     }
 
     .site-row-wrap.is-open .site-row-panel {

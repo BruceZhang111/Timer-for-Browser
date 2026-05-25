@@ -254,6 +254,28 @@ async function removeTrackedSite(siteId) {
   return site;
 }
 
+async function reorderTrackedSites(siteIds) {
+  if (!Array.isArray(siteIds) || siteIds.length === 0) {
+    throw new Error("排序列表不能为空");
+  }
+  const custom = await getCustomSites();
+  const map = new Map(custom.map((s) => [s.id, s]));
+  const reordered = [];
+  for (const id of siteIds) {
+    const site = map.get(id);
+    if (!site) throw new Error(`未找到追踪站点 ${id}`);
+    reordered.push(site);
+    map.delete(id);
+  }
+  // Append any remaining sites not in the list (shouldn't happen normally)
+  for (const site of map.values()) {
+    reordered.push(site);
+  }
+  await saveCustomSites(reordered);
+  await refreshSitesCache();
+  return reordered;
+}
+
 async function renameTrackedSite(siteId, newName) {
   const trimmed = (newName || "").trim();
   if (!trimmed) throw new Error("名称不能为空");

@@ -257,6 +257,16 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     });
     return true;
   }
+  if (message?.type === "REORDER_TRACKED_SITES") {
+    reorderTrackedSites(message.siteIds)
+      .then((trackedSites) => {
+        sendResponse({ ok: true, trackedSites });
+      })
+      .catch((err) => {
+        sendResponse({ ok: false, error: err.message || String(err) });
+      });
+    return true;
+  }
   if (message?.type === "RESUME_SESSION") {
     resumeActiveTabSession()
       .then(() => sendResponse({ ok: true }))

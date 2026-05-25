@@ -18,6 +18,373 @@ function formatDuration(totalSeconds) {
   return `${minutes}分${seconds}秒`;
 }
 
+/* ================================================================
+   Drag‑and‑drop controller (FLIP animation strategy, rAF‑batched)
+   ================================================================ */
+const dragCtrl = {
+  active: false,
+  sourceEl: null,
+  cloneEl: null,
+  sourceIndex: -1,
+  currentIndex: -1,
+  pointerOffsetY: 0,
+  listEl: null,
+  scrollEl: null,
+  moved: false,
+  threshold: 5,
+
+  /* ---- Geometry cache (computed once per drag start / after each reorder) ---- */
+  _startY: 0,
+  baseTop: 0,
+  itemFullHeight: 0,
+  itemCount: 0,
+
+  /* ---- rAF throttle ---- */
+  _rafId: null,
+  _pendingY: 0,
+
+  /* ---- Flip cleanup tracking ---- */
+  _flipTimerId: null,
+
+  init(listEl, scrollEl) {
+    this.listEl = listEl;
+    this.scrollEl = scrollEl;
+  },
+
+  onPointerDown(e) {
+    if (this.active) return;
+
+    const row = e.target.closest(".site-row-wrap");
+    if (!row) return;
+    if (e.target.closest(".btn-more, .action-btn, .site-row-actions")) return;
+
+    const rows = this.listEl.querySelectorAll(".site-row-wrap");
+    if (rows.length <= 1) return;
+
+    if (typeof closeAllRowMenus === "function") closeAllRowMenus();
+
+    this.sourceEl = row;
+    this.sourceIndex = [...this.listEl.children].indexOf(row);
+    this.currentIndex = this.sourceIndex;
+    this._startY = e.clientY;
+    this.moved = false;
+
+    row.setPointerCapture(e.pointerId);
+    row.addEventListener("pointermove", this._onRowMove);
+    row.addEventListener("pointerup", this._onRowUp);
+    row.addEventListener("pointercancel", this._onRowUp);
+  },
+
+  _onRowMove(e) {
+    const self = dragCtrl;
+    const dy = e.clientY - self._startY;
+    if (!self.moved && Math.abs(dy) < self.threshold) return;
+
+    if (!self.moved) {
+      self.moved = true;
+      self._startDrag(e.clientY);
+    }
+
+    /* rAF-batched: only one visual update per frame */
+    self._pendingY = e.clientY;
+    if (!self._rafId) {
+      self._rafId = requestAnimationFrame(() => {
+        self._rafId = null;
+        self._doUpdateDrag(self._pendingY);
+      });
+    }
+  },
+
+  _onRowUp(e) {
+    const self = dragCtrl;
+    const row = self.sourceEl;
+    if (row) {
+      row.removeEventListener("pointermove", self._onRowMove);
+      row.removeEventListener("pointerup", self._onRowUp);
+      row.removeEventListener("pointercancel", self._onRowUp);
+    }
+
+    if (self._rafId) {
+      cancelAnimationFrame(self._rafId);
+      self._rafId = null;
+    }
+
+    if (!self.moved) {
+      self._fireClick(row);
+    } else {
+      self._endDrag();
+    }
+    self.active = false;
+    self.sourceEl = null;
+    self.moved = false;
+
+    /* Resume timers that were paused during drag */
+    if (typeof resumeTimers === "function") resumeTimers();
+  },
+
+  /* ================================================================
+     Drag start — measure geometry once
+     ================================================================ */
+  _startDrag(pointerY) {
+    this.active = true;
+
+    /* Pause background timers to avoid DOM rebuild during drag */
+    if (typeof pauseTimers === "function") pauseTimers();
+
+    /* Clean up any lingering clone */
+    if (this.cloneEl) {
+      this.cloneEl.remove();
+      this.cloneEl = null;
+    }
+    this._cancelFlipCleanup();
+
+    /* ---- Measure item geometry (once) ---- */
+    const allItems = [...this.listEl.querySelectorAll(".site-row-wrap")];
+    this.itemCount = allItems.length;
+
+    if (allItems.length >= 2) {
+      const r0 = allItems[0].getBoundingClientRect();
+      const r1 = allItems[1].getBoundingClientRect();
+      this.itemFullHeight = r1.top - r0.top;
+    } else {
+      this.itemFullHeight = allItems[0].getBoundingClientRect().height + 12;
+    }
+    /* Virtual top of item index 0 in viewport coords */
+    this.baseTop = allItems[0].getBoundingClientRect().top;
+
+    /* ---- Build floating clone ---- */
+    const panel = this.sourceEl.querySelector(".site-row-panel");
+    const rect = panel.getBoundingClientRect();
+
+    const cloneWrap = document.createElement("div");
+    cloneWrap.className = "drag-clone";
+    cloneWrap.style.width = Math.round(rect.width) + "px";
+    cloneWrap.style.left = Math.round(rect.left) + "px";
+    cloneWrap.style.top = Math.round(rect.top) + "px";
+
+    const panelClone = panel.cloneNode(true);
+    cloneWrap.appendChild(panelClone);
+    document.body.appendChild(cloneWrap);
+
+    this.cloneEl = cloneWrap;
+    this.pointerOffsetY = rect.top - pointerY;
+
+    /* Ghost the source slot */
+    this.sourceEl.classList.add("is-drag-source");
+  },
+
+  /* ================================================================
+     Frame‑batched update — O(1) target calculation
+     ================================================================ */
+  _doUpdateDrag(pointerY) {
+    /* -- Move clone (rounded to whole pixels, no sub‑pixel blur) -- */
+    const top = Math.round(pointerY + this.pointerOffsetY);
+    this.cloneEl.style.top = top + "px";
+
+    /* -- Auto‑scroll near edges -- */
+    this._autoScroll(pointerY);
+
+    /* -- O(1) target index: arithmetic from geometry cache -- */
+    this._refreshBaseTop();
+    const raw = Math.floor((pointerY - this.baseTop + this.itemFullHeight * 0.5) / this.itemFullHeight);
+    const targetIdx = Math.max(0, Math.min(raw, this.itemCount - 1));
+
+    if (targetIdx !== this.currentIndex) {
+      this._reorder(targetIdx);
+    }
+  },
+
+  /* Single getBoundingClientRect call to account for auto‑scroll shift */
+  _refreshBaseTop() {
+    const first = this.listEl.querySelector(".site-row-wrap");
+    if (!first) return;
+    const idx = [...this.listEl.children].indexOf(first);
+    this.baseTop = first.getBoundingClientRect().top - idx * this.itemFullHeight;
+  },
+
+  /* ================================================================
+     Auto‑scroll — only hit getBoundingClientRect when near edges
+     ================================================================ */
+  _autoScroll(pointerY) {
+    const margin = 50;
+    const scrollRect = this.scrollEl.getBoundingClientRect();
+    if (pointerY > scrollRect.top + margin && pointerY < scrollRect.bottom - margin) return;
+
+    const zone = 40;
+    const maxSpeed = 6;
+
+    if (pointerY < scrollRect.top + zone) {
+      const frac = Math.max(0, 1 - (pointerY - scrollRect.top) / zone);
+      this.scrollEl.scrollTop = Math.max(0, this.scrollEl.scrollTop - frac * maxSpeed);
+    } else if (pointerY > scrollRect.bottom - zone) {
+      const frac = Math.max(0, 1 - (scrollRect.bottom - pointerY) / zone);
+      this.scrollEl.scrollTop += frac * maxSpeed;
+    }
+  },
+
+  /* ================================================================
+     FLIP reorder — batch reads, cancel stale cleanups
+     ================================================================ */
+  _reorder(targetIdx) {
+    if (targetIdx === this.currentIndex) return;
+    const oldIdx = this.currentIndex;
+
+    this._cancelFlipCleanup();
+
+    /* ---- Phase 1: read all old positions ---- */
+    const allItems = [...this.listEl.querySelectorAll(".site-row-wrap")];
+    const first = new Map();
+    for (const item of allItems) {
+      if (item !== this.sourceEl) {
+        first.set(item, item.getBoundingClientRect().top);
+      }
+    }
+
+    /* ---- Phase 2: mutate DOM ---- */
+    const children = [...this.listEl.children];
+    if (targetIdx > oldIdx) {
+      this.listEl.insertBefore(this.sourceEl, children[targetIdx + 1] || null);
+    } else {
+      this.listEl.insertBefore(this.sourceEl, children[targetIdx]);
+    }
+
+    /* ---- Phase 3: read new positions, compute deltas ---- */
+    const flipping = [];
+    for (const [item, oldTop] of first) {
+      const newTop = item.getBoundingClientRect().top;
+      const delta = oldTop - newTop;
+      if (Math.abs(delta) > 0.2) {
+        flipping.push({ item, delta });
+      }
+    }
+
+    /* ---- Phase 4: invert (apply inverse transform, no transition) ---- */
+    for (const { item, delta } of flipping) {
+      item.classList.add("is-flipping");
+      item.style.transition = "none";
+      item.style.transform = `translateY(${delta}px)`;
+    }
+
+    /* ---- Phase 5: play (enable spring transition, remove inverse) ---- */
+    if (flipping.length) {
+      flipping[0].item.getBoundingClientRect(); // force style flush
+    }
+
+    for (const { item } of flipping) {
+      item.style.transition = "";  // CSS class `.is-flipping` provides the spring curve
+      item.style.transform = "";
+    }
+
+    /* ---- Cleanup after animation ---- */
+    this._flipTimerId = setTimeout(() => {
+      this._flipTimerId = null;
+      for (const { item } of flipping) {
+        item.classList.remove("is-flipping");
+        item.style.transform = "";
+      }
+    }, 320);
+
+    this.currentIndex = targetIdx;
+  },
+
+  _cancelFlipCleanup() {
+    if (this._flipTimerId != null) {
+      clearTimeout(this._flipTimerId);
+      this._flipTimerId = null;
+    }
+    /* Also scrub any leftover flip classes on current items */
+    for (const el of this.listEl.querySelectorAll(".is-flipping")) {
+      el.classList.remove("is-flipping");
+      el.style.transform = "";
+      el.style.transition = "";
+    }
+  },
+
+  /* ================================================================
+     Drag end — spring clone to target, then persist
+     ================================================================ */
+  _endDrag() {
+    if (!this.cloneEl || !this.sourceEl) return;
+
+    this._cancelFlipCleanup();
+
+    const panel = this.sourceEl.querySelector(".site-row-panel");
+    const targetRect = panel.getBoundingClientRect();
+
+    this.cloneEl.style.transition =
+      "left 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), top 0.25s cubic-bezier(0.34, 1.56, 0.64, 1)";
+    this.cloneEl.style.left = Math.round(targetRect.left) + "px";
+    this.cloneEl.style.top = Math.round(targetRect.top) + "px";
+
+    this.sourceEl.classList.remove("is-drag-source");
+
+    const onEnd = () => {
+      if (this.cloneEl) {
+        this.cloneEl.remove();
+        this.cloneEl = null;
+      }
+      this._persistOrder();
+    };
+
+    this.cloneEl.addEventListener("transitionend", onEnd, { once: true });
+    setTimeout(() => {
+      if (this.cloneEl) {
+        this.cloneEl.remove();
+        this.cloneEl = null;
+        this._persistOrder();
+      }
+    }, 350);
+  },
+
+  /* ================================================================
+     Click micro‑interaction
+     ================================================================ */
+  _fireClick(row) {
+    if (!row) return;
+    row.classList.add("is-clicked");
+    setTimeout(() => row.classList.remove("is-clicked"), 250);
+  },
+
+  async _persistOrder() {
+    const items = this.listEl.querySelectorAll(".site-row-wrap");
+    const orderedIds = [...items].map((el) => el.dataset.siteId).filter(Boolean);
+    try {
+      await browser.runtime.sendMessage({
+        type: "REORDER_TRACKED_SITES",
+        siteIds: orderedIds,
+      });
+    } catch (e) {
+      console.warn("[timer-for-browser popup] reorder persist failed", e);
+    }
+  },
+};
+
+/* ---- Timer pause/resume: prevents DOM rebuilds mid‑drag ---- */
+let _syncTimerId = null;
+let _uiTimerId = null;
+
+function pauseTimers() {
+  if (_syncTimerId != null) { clearInterval(_syncTimerId); _syncTimerId = null; }
+  if (_uiTimerId != null) { clearInterval(_uiTimerId); _uiTimerId = null; }
+}
+
+function resumeTimers() {
+  if (_syncTimerId == null) {
+    _syncTimerId = setInterval(() => {
+      if (dragCtrl.active) return;
+      syncFromBackground();
+    }, 2000);
+  }
+  if (_uiTimerId == null) {
+    _uiTimerId = setInterval(() => {
+      if (dragCtrl.active) return; // skip during drag
+      if (document.getElementById("view-main").classList.contains("active")) {
+        renderFromSnapshot(Date.now(), { rebuildList: false });
+      }
+    }, 1000);
+  }
+}
+
 function sitesWithLivePending(baseSites, tracking, nowMs) {
   const sites = { ...baseSites };
   if (!tracking?.siteId || tracking.sessionStart == null) return sites;
@@ -329,6 +696,10 @@ function renderSiteList(sites) {
     const main = document.createElement("div");
     main.className = "site-row-main";
 
+    const handle = document.createElement("span");
+    handle.className = "drag-handle";
+    handle.setAttribute("aria-hidden", "true");
+
     const name = document.createElement("span");
     name.className = "site-name";
     name.textContent = site.name;
@@ -338,7 +709,7 @@ function renderSiteList(sites) {
     time.className = "site-time";
     time.textContent = formatDuration(sec);
 
-    main.append(name, time);
+    main.append(handle, name, time);
 
     const moreBtn = document.createElement("button");
     moreBtn.type = "button";
@@ -496,6 +867,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  // Drag-and-drop sorting
+  dragCtrl.init(
+    document.getElementById("site-list"),
+    document.getElementById("site-list-scroll")
+  );
+  document.getElementById("site-list").addEventListener("pointerdown", (e) => {
+    dragCtrl.onPointerDown(e);
+  });
+
   browser.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
     if (changes.customSites) {
@@ -507,16 +887,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  const syncTimer = setInterval(syncFromBackground, 2000);
-  const uiTimer = setInterval(() => {
+  _syncTimerId = setInterval(() => {
+    if (dragCtrl.active) return; // skip full rebuild during drag
+    syncFromBackground();
+  }, 2000);
+  _uiTimerId = setInterval(() => {
+    if (dragCtrl.active) return; // skip during drag
     if (document.getElementById("view-main").classList.contains("active")) {
       renderFromSnapshot(Date.now(), { rebuildList: false });
     }
   }, 1000);
 
   window.addEventListener("unload", () => {
-    clearInterval(syncTimer);
-    clearInterval(uiTimer);
+    if (_syncTimerId != null) { clearInterval(_syncTimerId); _syncTimerId = null; }
+    if (_uiTimerId != null) { clearInterval(_uiTimerId); _uiTimerId = null; }
     browser.runtime.sendMessage({ type: "RESUME_SESSION" }).catch(() => {});
   });
 });
