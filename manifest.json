@@ -3,10 +3,13 @@
   "name": "Timer for Browser",
   "version": "1.2.0",
   "description": "持久统计指定网站每日前台停留时间，每日 0:00 自动清零",
-  "applications": {
+  "browser_specific_settings": {
     "gecko": {
       "id": "timer-for-browser@nowadays.local",
-      "strict_min_version": "91.0"
+      "strict_min_version": "91.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
     }
   },
   "permissions": [
