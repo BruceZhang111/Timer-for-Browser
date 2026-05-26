@@ -1,31 +1,22 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "name": "Timer for Browser",
   "version": "1.5.0",
   "description": "持久统计指定网站每日前台停留时间，每日 0:00 自动清零",
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "timer-for-browser@nowadays.local",
-      "strict_min_version": "91.0",
-      "data_collection_permissions": {
-        "required": ["none"]
-      }
-    }
-  },
   "permissions": [
     "tabs",
     "storage",
     "alarms"
   ],
-  "optional_permissions": [
+  "optional_host_permissions": [
     "https://*/*",
     "http://*/*"
   ],
   "background": {
-    "scripts": ["sites.js", "storage.js", "background.js"],
-    "persistent": true
+    "service_worker": "background_wrapper.js",
+    "scripts": ["background_wrapper.js"]
   },
-  "browser_action": {
+  "action": {
     "default_title": "网站停留时间",
     "default_popup": "popup.html",
     "default_icon": "icons/timer.svg"

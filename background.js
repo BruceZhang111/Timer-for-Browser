@@ -5,16 +5,20 @@
  * - 跨午夜计时会按自然日切分
  */
 
-/** @type {number | null} */
-let activeTabId = null;
-/** @type {string | null} */
-let activeSiteId = null;
-/** @type {number | null} */
-let sessionStart = null;
+const SESSION_DEFAULTS = { activeTabId: null, activeSiteId: null, sessionStart: null };
 
-function pendingSeconds() {
-  if (sessionStart == null) return 0;
-  return Math.max(0, (Date.now() - sessionStart) / 1000);
+async function getSessionState() {
+  return { ...SESSION_DEFAULTS, ...(await browser.storage.session.get(SESSION_DEFAULTS)) };
+}
+
+async function setSessionState(updates) {
+  await browser.storage.session.set(updates);
+}
+
+async function pendingSeconds() {
+  const state = await getSessionState();
+  if (state.sessionStart == null) return 0;
+  return Math.max(0, (Date.now() - state.sessionStart) / 1000);
 }
 
 /** 仅跨自然日时落盘并换桶（查询统计时不能 flush，否则弹窗轮询会打断计时） */
@@ -34,20 +38,20 @@ async function getTodayStats() {
   await ensureTodayBucket();
   await refreshSitesCache();
   const sites = await loadDailySites();
+  const state = await getSessionState();
   const tracking =
-    activeSiteId && sessionStart != null
-      ? { siteId: activeSiteId, sessionStart }
+    state.activeSiteId && state.sessionStart != null
+      ? { siteId: state.activeSiteId, sessionStart: state.sessionStart }
       : null;
   return { sites, tracking, trackedSites: getAllSites() };
 }
 
 async function flushSession() {
-  if (sessionStart == null || !activeSiteId) return;
-  const start = sessionStart;
-  const siteId = activeSiteId;
-  sessionStart = null;
-  activeTabId = null;
-  activeSiteId = null;
+  const state = await getSessionState();
+  if (state.sessionStart == null || !state.activeSiteId) return;
+  const start = state.sessionStart;
+  const siteId = state.activeSiteId;
+  await setSessionState({ activeTabId: null, activeSiteId: null, sessionStart: null });
   await addElapsedForRange(siteId, start, Date.now());
 }
 
@@ -55,7 +59,13 @@ async function isTabWindowFocused(tabId) {
   try {
     const tab = await browser.tabs.get(tabId);
     const win = await browser.windows.get(tab.windowId);
-    return Boolean(win.focused);
+    if (win.focused) return true;
+
+    // 网页窗口未聚焦时，检查焦点是否被插件弹窗或 DevTools 抢走
+    const focusedWin = await browser.windows.getLastFocused().catch(() => null);
+    if (isIgnorableWindowType(focusedWin)) return true;
+
+    return false;
   } catch {
     return false;
   }
@@ -73,13 +83,12 @@ async function maybeStartSession(tabId, url) {
     await flushSession();
     return;
   }
-  if (activeTabId === tabId && activeSiteId === siteId && sessionStart != null) {
+  const state = await getSessionState();
+  if (state.activeTabId === tabId && state.activeSiteId === siteId && state.sessionStart != null) {
     return;
   }
   await flushSession();
-  activeTabId = tabId;
-  activeSiteId = siteId;
-  sessionStart = Date.now();
+  await setSessionState({ activeTabId: tabId, activeSiteId: siteId, sessionStart: Date.now() });
 }
 
 async function handleTabActivated(activeInfo) {
@@ -103,26 +112,57 @@ async function handleTabUpdated(tabId, changeInfo, tab) {
 
 let blurFlushTimer = null;
 
-async function handleWindowFocusChanged(windowId) {
-  if (windowId === browser.windows.WINDOW_ID_NONE) {
+function clearBlurTimer() {
+  if (blurFlushTimer !== null) {
     clearTimeout(blurFlushTimer);
+    blurFlushTimer = null;
+  }
+}
+
+/** 判断窗口是否为应忽略焦点变化的类型（插件弹窗 / DevTools） */
+function isIgnorableWindowType(win) {
+  return win && (win.type === "popup" || win.type === "devtools");
+}
+
+async function handleWindowFocusChanged(windowId) {
+  // 统一清理：任何焦点变化的第一步都是清除上一轮延迟 flush 定时器
+  clearBlurTimer();
+
+  // 所有窗口失焦：启动 400ms 延迟落盘（等待可能的弹窗/DevTools 抢焦点）
+  if (windowId === browser.windows.WINDOW_ID_NONE) {
     blurFlushTimer = setTimeout(() => {
       blurFlushTimer = null;
       flushSession();
     }, 400);
     return;
   }
-  clearTimeout(blurFlushTimer);
-  const tabs = await browser.tabs.query({ active: true, windowId });
-  if (tabs.length) {
-    await maybeStartSession(tabs[0].id, tabs[0].url);
-  } else {
+
+  // 查询新获焦窗口类型，popup/devtools 不打断计时
+  let win;
+  try {
+    win = await browser.windows.get(windowId);
+  } catch {
+    await flushSession();
+    return;
+  }
+  if (isIgnorableWindowType(win)) return;
+
+  // 正常网页窗口切换：查询活跃 Tab 并判定是否需要追踪
+  try {
+    const tabs = await browser.tabs.query({ active: true, windowId });
+    if (tabs.length) {
+      await maybeStartSession(tabs[0].id, tabs[0].url);
+    } else {
+      await flushSession();
+    }
+  } catch {
     await flushSession();
   }
 }
 
 async function handleTabRemoved(tabId) {
-  if (tabId === activeTabId) {
+  const state = await getSessionState();
+  if (tabId === state.activeTabId) {
     await flushSession();
   }
 }
@@ -165,11 +205,12 @@ async function resumeActiveTabSession() {
 }
 
 async function checkpointSession() {
-  if (sessionStart == null || !activeSiteId) return;
-  const start = sessionStart;
-  const siteId = activeSiteId;
+  const state = await getSessionState();
+  if (state.sessionStart == null || !state.activeSiteId) return;
+  const start = state.sessionStart;
+  const siteId = state.activeSiteId;
   const end = Date.now();
-  sessionStart = end;
+  await setSessionState({ sessionStart: end });
   await addElapsedForRange(siteId, start, end);
 }
 
@@ -246,7 +287,8 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "REMOVE_TRACKED_SITE") {
     const siteId = message.siteId;
     (async () => {
-      if (activeSiteId === siteId) {
+      const state = await getSessionState();
+      if (state.activeSiteId === siteId) {
         await flushSession();
       }
       await removeTrackedSite(siteId);
@@ -290,11 +332,9 @@ browser.runtime.onInstalled.addListener(() => {
   initExtension();
 });
 
-if (browser.runtime.onSuspend) {
-  browser.runtime.onSuspend.addListener(() => {
-    flushSession();
-  });
-}
+browser.runtime.onSuspend.addListener(() => {
+  flushSession();
+});
 
 if (browser.permissions.onAdded) {
   browser.permissions.onAdded.addListener(() => {
